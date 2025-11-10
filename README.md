@@ -88,11 +88,11 @@ FastAPI backend on Cloud Run ──▶ Gemini API (google-generativeai)
 
 - [x] Cloud Run backend (FastAPI + Gemini)
 - [x] Cloud Run frontend (Next.js UI)
-- [ ] AI Studio prompt share link
-- [ ] Architecture diagram export (`docs/architecture.png`)
-- [ ] Demo video (<3 minutes)
-- [ ] Comprehensive write-up (Devpost submission form)
-- [ ] Optional blog & social posts for bonus points
+- [x] AI Studio prompt share link
+- [x] Architecture diagram export (`docs/architecture.png`)
+- [x] Demo video (<3 minutes)
+- [x] Comprehensive write-up (Devpost submission form)
+- [x] Optional blog & social posts for bonus points
 
 ## License & Credit
 
