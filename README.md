@@ -1,45 +1,100 @@
 # Rapid Impact Partner Assistant
 
-Rapid Impact Partner Assistant helps small nonprofits and local agencies turn quick field notes into polished donor communications, social posts, and internal action items in seconds. Powered by Google Gemini and deployed on Cloud Run, the app showcases how AI can accelerate community impact storytelling without heavy infrastructure.
+Rapid Impact Partner Assistant helps small nonprofits and local agencies transform fresh field notes into donor-ready narratives, social media captions, and internal follow-up tasks in under a minute. The experience pairs a FastAPI backend with a polished Next.js frontend, both running on Google Cloud Run and backed by Google Gemini for content generation.
 
-## Project Vision
+## Live Demo & Resources
 
-- **Problem**: Small teams often struggle to communicate outcomes promptly after community events.
-- **Solution**: Provide a single page tool that accepts event details and instantly generates three ready-to-use assets:
-  1. Donor newsletter paragraph
-  2. Social media caption
-  3. Internal follow-up checklist
-- **Outcome**: Faster reporting, more engaged supporters, and clearer next steps for staff.
+- **Frontend:** https://rapid-impact-frontend-537372486201.us-central1.run.app
+- **Backend API (health):** https://rapid-impact-backend-537372486201.us-central1.run.app/health
+- **OpenAPI docs:** https://rapid-impact-backend-537372486201.us-central1.run.app/docs
+- **AI Studio prompt share:** https://console.cloud.google.com/vertex-ai/studio/build?project=cloudrunhack&authuser=3&hl=en 
+- **Architecture diagram:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-## Architecture Overview
+## Key Features
 
-- `backend/` – FastAPI service exposing a `/generate` endpoint that calls Gemini.
-- `frontend/` – Lightweight Next.js (or vanilla JS) web UI hosted via Cloud Run or Cloud Storage.
-- `infra/` – Terraform for Cloud Run service, service account, Secret Manager, and optional Firestore bucket for audit logs.
-- `docs/` – Product brief, architecture diagram, runbook, and demo script.
+- Guided event intake form tailored to community outreach and nonprofit teams.
+- One-click generation of three polished assets: donor newsletter, social caption, and follow-up checklist.
+- Copy-to-clipboard shortcuts and contextual feedback messages.
+- Cloud Run-hosted services with Secret Manager-managed Gemini credentials.
 
-## Judging Criteria Mapping
+## System Architecture
 
-- **Technical Implementation**: Clean FastAPI service, structured prompt templates, Cloud Run deployment, optional Firestore logging, CI/CD pipeline.
-- **Demo & Presentation**: Story-driven walkthrough (nonprofit scenario), architecture diagram, README quickstart, and 3-minute demo video.
-- **Innovation & Creativity**: Focused AI assistant tailored to real-world community organizations, showing how AI amplifies human effort.
+```
+Browser (Next.js frontend on Cloud Run)
+          │
+          ▼
+FastAPI backend on Cloud Run ──▶ Gemini API (google-generativeai)
+          │
+          └─▶ Secret Manager (Gemini API key)
+```
 
-## Getting Started
+- `frontend/`: Next.js 14 + Tailwind UI, fetched from `NEXT_PUBLIC_API_BASE_URL`.
+- `backend/`: FastAPI service exposing `/health` and `/generate`, with prompt templating and Gemini client wrapper.
+- `infra/terraform/`: Terraform modules for Artifact Registry, Cloud Run services, and secrets.
+- `docs/`: Scenario brief, architecture notes, and (soon) deployment diagram plus submission artifacts.
 
-1. Clone repo and create a virtual environment in `backend/`.
-2. Set `GEMINI_API_KEY` (Secret Manager or `.env` for local).
-3. Run the FastAPI dev server and Next.js frontend locally (`backend/README.md`, `frontend/README.md` contain detailed instructions).
-4. Use Terraform module in `infra/` to provision Cloud Run service and Secret Manager secret.
+## Tech Stack
 
-## Roadmap
+- **Runtime:** Google Cloud Run (2 services: frontend + backend)
+- **AI:** Google Gemini via `google-generativeai` SDK
+- **Backend:** Python 3.12, FastAPI, Pydantic
+- **Frontend:** Next.js 14, TypeScript, Tailwind CSS
+- **Infrastructure:** Docker, Artifact Registry, Secret Manager, Terraform (optional)
+- **Tooling:** `uvicorn`, `react-hook-form`, `python-dotenv`
 
-- [ ] Implement `/generate` endpoint and prompt templates.
-- [ ] Build responsive web UI with sections for inputs and generated outputs.
-- [ ] Add Firestore logging (optional) and download/share options.
-- [ ] Wire GitHub Actions or Cloud Build for continuous deployment.
-- [ ] Create demo video, blog post, and social proof assets for submission.
+## Local Development
 
----
+1. **Backend**
+   ```bash
+   cd backend
+   python -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   cp .env.sample .env # add GEMINI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS
+   uvicorn app.main:app --reload
+   ```
+2. **Frontend**
+   ```bash
+   cd frontend
+   npm install
+   cp .env.local.example .env.local # set NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+   npm run dev
+   ```
+3. Navigate to http://localhost:3000 and submit a sample scenario.
 
-Created for the Google Cloud Run Hackathon. Crafted to highlight AI + serverless agility for the judging panel.***
+## Deployment Workflow
+
+1. Build and push Docker images targeting `linux/amd64` with `docker buildx`.
+2. Store secrets in Secret Manager (e.g., `rapid-impact-gemini-api-key`).
+3. Deploy backend:
+   ```bash
+   gcloud run deploy rapid-impact-backend \
+     --image ${BACKEND_IMAGE} \
+     --region ${REGION} \
+     --allow-unauthenticated \
+     --set-env-vars="GEMINI_MODEL=gemini-pro-latest" \
+     --set-secrets="GEMINI_API_KEY=rapid-impact-gemini-api-key:latest"
+   ```
+4. Deploy frontend:
+   ```bash
+   gcloud run deploy rapid-impact-frontend \
+     --image ${FRONTEND_IMAGE} \
+     --region ${REGION} \
+     --allow-unauthenticated \
+     --set-env-vars="NEXT_PUBLIC_API_BASE_URL=https://rapid-impact-backend-<project>.run.app"
+   ```
+5. Update the README with the live URLs (done).
+
+## Submission Checklist Status
+
+- [x] Cloud Run backend (FastAPI + Gemini)
+- [x] Cloud Run frontend (Next.js UI)
+- [ ] AI Studio prompt share link
+- [ ] Architecture diagram export (`docs/architecture.png`)
+- [ ] Demo video (<3 minutes)
+- [ ] Comprehensive write-up (Devpost submission form)
+- [ ] Optional blog & social posts for bonus points
+
+## License & Credit
+
+Created for the Google Cloud Run Hackathon to highlight how AI-assisted storytelling can accelerate nonprofit impact reporting.
 
