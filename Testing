@@ -1,0 +1,46 @@
+summary := fmt.Sprintf(
+    "Found %d stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) in zones %v.",
+    count,
+    zoneList,
+)
+
+// ---- Instance consumption type check (task requirement) ----
+if firstInstance != "" {
+    prov := "UNKNOWN"
+    if p, err := getInstanceProvisioningModel(
+        ctx,
+        h.c.GetDefaultProjectID(),
+        firstZone,
+        firstInstance,
+    ); err == nil {
+        prov = p
+    }
+
+    summary += fmt.Sprintf(
+        "\nOne affected instance: %s in zone %s had provisioning model: %s.",
+        firstInstance,
+        firstZone,
+        prov,
+    )
+} else {
+    summary += "\nCould not reliably identify an affected instance from logs."
+}
+
+// ---- Reservation correlation (task requirement) ----
+if firstTs != "" && firstZone != "" {
+    if t, err := time.Parse(time.RFC3339, firstTs); err == nil {
+        overlap, err := reservationsContainTimestamp(
+            ctx,
+            h.c.GetDefaultProjectID(),
+            firstZone,
+            t,
+        )
+        if err == nil {
+            summary += fmt.Sprintf(
+                "\nStockout time overlaps with reservation in zone %s: %t.",
+                firstZone,
+                overlap,
+            )
+        }
+    }
+}
