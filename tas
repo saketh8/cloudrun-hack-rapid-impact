@@ -579,26 +579,35 @@ func (h *handlers) searchLogsMCP(ctx context.Context, request interface{}, searc
 					clusters[res[4]] = true
 				}
 
-				if firstInstance == "" && len(res) > 2 && res[2] != "" {
-					firstInstance = res[2]
+				if firstInstance == "" {
+					if len(res) > 2 && res[2] != "" {
+						firstInstance = res[2]
+					} else {
+						firstInstance = extractInstanceFromPayload(res[0])
+					}
 					firstZone = res[3]
 					firstTs = res[1]
 				}
 			}
 
 			zoneList := keys(zones)
-			clusterList := keys(clusters)
+			//clusterList := keys(clusters)
 
 			summary := fmt.Sprintf(
-				"Stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) detected in zones %v affecting clusters %v.",
-				zoneList, clusterList,
+				"Found %d stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) in zones %v.",
+				count,
+				zoneList,
 			)
 
 			// ---- Instance consumption type check (task requirement) ----
 			if firstInstance != "" {
 				prov, err := getInstanceProvisioningModel(ctx, h.c.GetDefaultProjectID(), firstZone, firstInstance)
 				if err == nil {
-					summary += fmt.Sprintf("\nInstance %s provisioning model: %s.", firstInstance, prov)
+					summary += fmt.Sprintf("\nOne affected instance: %s in zone %s had provisioning model: %s.",
+						firstInstance,
+						firstZone,
+						prov,
+					)
 				}
 
 				// ---- Reservation correlation (task requirement) ----
@@ -608,7 +617,8 @@ func (h *handlers) searchLogsMCP(ctx context.Context, request interface{}, searc
 						if err == nil {
 							summary += fmt.Sprintf(
 								"\nStockout time overlaps with reservation in zone %s: %t.",
-								firstZone, overlap,
+								firstZone,
+								overlap,
 							)
 						}
 					}
@@ -993,6 +1003,15 @@ func runGcloudListCommand(resource string) ([]string, error) {
 	}
 
 	return names, nil
+}
+
+func extractInstanceFromPayload(payload string) string {
+	re := regexp.MustCompile(`node ([a-zA-Z0-9_-]+)`)
+	m := re.FindStringSubmatch(payload)
+	if len(m) > 1 {
+		return m[1]
+	}
+	return ""
 }
 
 func keys(m map[string]bool) []string {
