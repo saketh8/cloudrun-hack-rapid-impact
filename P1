@@ -1,0 +1,33 @@
+func resolveInstanceNameFromID(
+    ctx context.Context,
+    projectID, zone, instanceID string,
+) (string, error) {
+
+    client, err := compute.NewInstancesRESTClient(ctx)
+    if err != nil {
+        return "", err
+    }
+    defer client.Close()
+
+    req := &computepb.ListInstancesRequest{
+        Project: projectID,
+        Zone:    zone,
+    }
+
+    it := client.List(ctx, req)
+    for {
+        inst, err := it.Next()
+        if err == iterator.Done {
+            break
+        }
+        if err != nil {
+            return "", err
+        }
+
+        if fmt.Sprintf("%d", inst.GetId()) == instanceID {
+            return inst.GetName(), nil
+        }
+    }
+
+    return "", fmt.Errorf("instance name not found for id %s", instanceID)
+}
