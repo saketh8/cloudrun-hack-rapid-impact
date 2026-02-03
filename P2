@@ -1,0 +1,32 @@
+if firstInstance != "" {
+
+    instName, err := resolveInstanceNameFromID(
+        ctx,
+        h.c.GetDefaultProjectID(),
+        firstZone,
+        firstInstance,
+    )
+
+    if err == nil {
+        prov, err := getInstanceProvisioningModel(
+            ctx,
+            h.c.GetDefaultProjectID(),
+            firstZone,
+            instName,
+        )
+        if err == nil {
+            summary += fmt.Sprintf(
+                "\nAffected instance: %s (ID: %s) in zone %s provisioning model: %s.",
+                instName,
+                firstInstance,
+                firstZone,
+                prov,
+            )
+        }
+    } else {
+        summary += fmt.Sprintf(
+            "\nAffected instance ID %s found, but instance name could not be resolved.",
+            firstInstance,
+        )
+    }
+}
