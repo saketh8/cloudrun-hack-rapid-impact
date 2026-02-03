@@ -1,0 +1,1 @@
+Description: "Check for stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) in GCP logs. This tool also identifies one affected instance, determines whether it was using reservation or spot capacity, and checks if the stockout time overlapped with any reservations.",
