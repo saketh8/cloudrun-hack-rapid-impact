@@ -1,0 +1,65 @@
+func keys(m map[string]bool) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+} else if searchType == WereThereStockoutErrors {
+	if logSearchSuccess && len(returnResults) > 0 {
+
+		zones := map[string]bool{}
+		clusters := map[string]bool{}
+		var firstInstance, firstZone, firstTs string
+
+		for _, res := range returnResults {
+			// res = [payload, ts, inst, zone, cluster]
+			if len(res) > 3 && res[3] != "" {
+				zones[res[3]] = true
+			}
+			if len(res) > 4 && res[4] != "" {
+				clusters[res[4]] = true
+			}
+
+			if firstInstance == "" && len(res) > 2 && res[2] != "" {
+				firstInstance = res[2]
+				firstZone = res[3]
+				firstTs = res[1]
+			}
+		}
+
+		zoneList := keys(zones)
+		clusterList := keys(clusters)
+
+		summary := fmt.Sprintf(
+			"Stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) detected in zones %v affecting clusters %v.",
+			zoneList, clusterList,
+		)
+
+		// ---- Instance consumption type check (task requirement) ----
+		if firstInstance != "" {
+			prov, err := getInstanceProvisioningModel(ctx, h.c.GetDefaultProjectID(), firstZone, firstInstance)
+			if err == nil {
+				summary += fmt.Sprintf("\nInstance %s provisioning model: %s.", firstInstance, prov)
+			}
+
+			// ---- Reservation correlation (task requirement) ----
+			if firstTs != "" {
+				if t, err := time.Parse(time.RFC3339, firstTs); err == nil {
+					overlap, err := reservationsContainTimestamp(ctx, h.c.GetDefaultProjectID(), firstZone, t)
+					if err == nil {
+						summary += fmt.Sprintf(
+							"\nStockout time overlaps with reservation in zone %s: %t.",
+							firstZone, overlap,
+						)
+					}
+				}
+			}
+		}
+
+		return summary, true, nil
+	}
+
+	return "No stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED) found.", false, nil
+}
