@@ -1,0 +1,13 @@
+Description: "Check if there were any stockout errors (ZONE_RESOURCE_POOL_EXHAUSTED). If no dates are provided, search defaults to the last 14 days.",
+
+
+"StartDate": map[string]interface{}{
+    "type":   "string",
+    "format": "date",
+    "description": "Start date (YYYY-MM-DD). Optional. Defaults to 14 days ago if not provided.",
+},
+"EndDate": map[string]interface{}{
+    "type":   "string",
+    "format": "date",
+    "description": "End date (YYYY-MM-DD). Optional. Defaults to today if not provided.",
+},
