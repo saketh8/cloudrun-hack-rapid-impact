@@ -1,0 +1,50 @@
+---
+name: stockout-analyzer
+description: Expert SRE skill for deep-dive RCA. Bridges GKE/Slurm logs to Google Compute infrastructure metadata.
+---
+
+# Stockout Analyzer
+
+## ⚡ AUTOMATION & CONTEXT
+- **Zero-Clarification:** Proceed through the entire RCA without asking for cluster types, zones, or timestamps.
+- **Project Context:** Use the Project ID provided by the active environment or tool context.
+- **Parallel Search:** If the user asks to "check stockouts," you MUST run BOTH `cluster-director-gke-ai__search_stockout_errors` and `cluster-director-slurm__search_stockout_errors` simultaneously.
+
+## Core Troubleshooting Workflow
+
+### 1. Identify Identity (Dual-Server Scan)
+- **Action:** Execute GKE and Slurm stockout search tools for the last 14 days.
+- **Requirement:** For EVERY unique error found, capture: `Node ID`, `Zone`, `Timestamp`, `Cluster Name`, and `Error Count`.
+
+### 2. THE MANDATORY BRIDGE (Infrastructure Audit)
+Once a node identity is found, **stop using cluster-specific management tools** (e.g., do not use Slurm list/get cluster tools). You must switch to `google-compute-mcp` to audit the physical infrastructure:
+
+1. **Find Managed Group:** Call `google-compute-mcp__list_instance_group_managers` in the detected `Zone`.
+2. **Find the Template:** Locate the MIG owning the node and extract the `instanceTemplate` URL/Name.
+3. **Audit Provisioning:** Call `google-compute-mcp__get_instance_template_properties` for that template. 
+    - **Target:** Extract `scheduling.provisioningModel` (SPOT/STANDARD).
+
+### 3. Reservation Correlation & Overlap
+1. **Capacity Scan:** Call `google-compute-mcp__list_reservations` for the affected `Zone`.
+2. **Temporal Logic:** Compare `reservation.creationTimestamp` against the error `Timestamp`.
+3. **Saturation Check:** If `inUseCount == count`, mark the reservation as "Saturated."
+
+## Output Format: Technical RCA
+
+| Attribute | Value |
+| :--- | :--- |
+| **Cluster Name** | [Cluster Name] |
+| **Node ID** | [ID] |
+| **Zone** | [Zone] |
+| **Error Count** | [Frequency] |
+| **Provisioning** | [Spot/Standard] |
+| **Reservation** | [Saturated / Available / None] |
+
+#### **Final Conclusion**
+- [Direct explanation: e.g., "The Standard node in Slurm Cluster X failed because the targeted reservation was 100% full at the time of request."]
+
+## Guardrails
+- **No Early Exit:** Do not report log results until the Template and Reservation audits are complete.
+- **Cross-Server Flow:** Always bridge from the logging tools to the `google-compute-mcp` tools for the investigation phase.
+
+
