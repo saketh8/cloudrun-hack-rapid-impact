@@ -1,0 +1,585 @@
+package genericCore
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"cloud.google.com/go/logging"
+	"cloud.google.com/go/logging/logadmin"
+	"google.golang.org/api/iterator"
+	"google.golang.org/protobuf/types/known/structpb"
+)
+
+const maxLogFiles = 100
+
+var logger *slog.Logger
+
+type SearchLogsResponse struct {
+	Status string `json:"status"`
+}
+
+type SearchStockoutLogsRequest struct {
+	StartDate   string `json:"StartDate,omitempty"`
+	EndDate     string `json:"EndDate,omitempty"`
+	ClusterName string `json:"ClusterName,omitempty"`
+	Zone        string `json:"Zone,omitempty"`
+	MaxResults  int    `json:"MaxResults,omitempty"`
+}
+
+type StockoutEvent struct {
+	ClusterName  string    `json:"cluster_name"`
+	InstanceName string    `json:"instance_name"`
+	Timestamp    time.Time `json:"timestamp"`
+	Zone         string    `json:"zone"`
+	ProjectID    string    `json:"project_id"`
+	Payload      string    `json:"payload"`
+}
+
+type StockoutSummary struct {
+	TotalCount  int            `json:"total_count"`
+	ByZone      map[string]int `json:"by_zone"`
+	LatestEvent *StockoutEvent `json:"latest_event,omitempty"`
+}
+
+// GcloudListItem represents a single item from the gcloud list command's JSON output.
+type GcloudListItem struct {
+	Name string `json:"name"`
+}
+
+func WriteToLog(message string) {
+
+	if logger == nil {
+		f := CreateUniqueFilePath("logs/log.cluster-director-mcp")
+		var writer io.Writer
+		if f != nil {
+			writer = f
+		} else {
+			writer = os.Stdout
+		}
+
+		opts := &slog.HandlerOptions{
+			AddSource: true,
+			Level:     slog.LevelInfo,
+		}
+
+		// Initialize the custom handler
+		handler := &PlainHandler{
+			w:    writer,
+			opts: *opts,
+		}
+
+		logger = slog.New(handler)
+		slog.SetDefault(logger)
+	}
+
+	// 1. Capture the Program Counter (PC) of the caller
+	// We skip 2 frames:
+	// 0 = runtime.Callers
+	// 1 = WriteToLog
+	// 2 = The function calling WriteToLog (e.g., clusterCore.go)
+	var pcs [1]uintptr
+	runtime.Callers(2, pcs[:])
+
+	// 2. Create the record with the specific PC
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, message, pcs[0])
+
+	// 3. Handle the record
+	_ = logger.Handler().Handle(context.Background(), r)
+}
+
+type PlainHandler struct {
+	w    io.Writer
+	opts slog.HandlerOptions
+}
+
+// Enabled reports whether the handler handles records at the given level.
+func (h *PlainHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.opts.Level.Level()
+}
+
+func ParseTime(dateStr string) (time.Time, bool) {
+
+	layouts := []string{
+		time.RFC3339,       // ISO 8601
+		"2006-01-02",       // YYYY-MM-DD
+		"01/02/2006",       // MM/DD/YYYY
+		"02-01-2006 15:04", // DD-MM-YYYY HH:MM
+		"Jan 2, 2006",      // Month Day, Year
+		"02 Jan 2006",      // Date (DD Mon YYYY) e.g., "25 Oct 2023"
+		"Jan 2",            // Date, Month (Mon DD) e.g., "Oct 25"
+		"02",               // Just the day
+	}
+
+	parsedTime, formatUsed, err := parseWithFallback(dateStr, layouts)
+	if err != nil {
+		WriteToLog("Could not parse date string: " + dateStr)
+		return time.Now(), false
+	}
+
+	// Post-processing: Infer missing data based on the format used
+	now := time.Now()
+
+	switch formatUsed {
+	case "02":
+		// Case: User gave only "Day". Use Current Year and Current Month.
+		parsedTime = time.Date(now.Year(), now.Month(), parsedTime.Day(), 0, 0, 0, 0, time.Local)
+
+	case "Jan 2":
+		// Case: User gave "Month Day". Use Current Year.
+		parsedTime = parsedTime.AddDate(now.Year(), 0, 0)
+	}
+	WriteToLog(fmt.Sprintf("Successfully parsed input date string %s \nParsed Time: %v\nFormat Used: %s\n", dateStr, parsedTime, formatUsed))
+
+	return parsedTime, true
+}
+
+func parseWithFallback(input string, formats []string) (time.Time, string, error) {
+	for _, layout := range formats {
+		t, err := time.Parse(layout, input)
+		if err == nil {
+			return t, layout, nil
+		}
+	}
+	return time.Time{}, "", errors.New("no matching time format found")
+}
+
+// Handle formats the record as a plain string without keys
+func (h *PlainHandler) Handle(ctx context.Context, r slog.Record) error {
+	// 1. Format Time
+	timeStr := r.Time.Format(time.RFC3339)
+
+	// 2. Format Source (File:Line)
+	sourceStr := ""
+	if h.opts.AddSource && r.PC != 0 {
+		fs := runtime.CallersFrames([]uintptr{r.PC})
+		f, _ := fs.Next()
+		sourceStr = fmt.Sprintf("%s:%d", f.File, f.Line)
+	}
+
+	// 3. Format Level
+	levelStr := r.Level.String()
+
+	// 4. Construct the final string: "TIME LEVEL SOURCE MESSAGE"
+	_, err := fmt.Fprintf(h.w, "%s %s %s %s\n", timeStr, levelStr, sourceStr, r.Message)
+	return err
+}
+
+func (h *PlainHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+
+func (h *PlainHandler) WithGroup(name string) slog.Handler { return h }
+
+// SearchByColumn1 searches for a target string in the second column (index 1).
+// It returns the found row and true, or nil and false if not found.
+func SearchByColumn1(data [][]string, target string) ([]string, bool) {
+	for _, row := range data {
+		// SAFETY CHECK: Ensure the row has at least 2 columns (indices 0 and 1)
+		// If we don't check this, a short row will cause a "panic: index out of range"
+		if len(row) > 1 {
+
+			// Option A: Exact Match (Case-Sensitive)
+			if row[1] == target {
+				return row, true
+			}
+
+			// Option B: Case-Insensitive Match (Uncomment to use)
+			// if strings.EqualFold(row[1], target) {
+			// 	return row, true
+			// }
+		}
+	}
+	return nil, false
+}
+
+// getLastLines scans the string and keeps a rolling slice of the last n lines.
+func GetLastLines(s string, n int) string {
+	var lines []string
+
+	// Use a scanner to read the string line by line
+	scanner := bufio.NewScanner(strings.NewReader(s))
+	for scanner.Scan() {
+		// Append the new line
+		lines = append(lines, scanner.Text())
+
+		// If we have more than n lines, drop the oldest one (at the front)
+		if len(lines) > n {
+			lines = lines[1:]
+		}
+	}
+	// We ignore scanner.Err() for this example
+
+	// Join the remaining lines back together
+	return strings.Join(lines, "\n")
+}
+
+func DeleteFile(filePathName string) bool {
+	err := os.Remove(filePathName)
+	if err != nil {
+		WriteToLog(fmt.Sprintf("Failed to delete file: %s", filePathName))
+		return false
+	}
+	return true
+}
+
+// dirExists checks if a directory exists at the given path.
+func CheckFileOrDirExists(path string, checkIfItsDir bool) bool {
+	// 1. Get FileInfo for the path.
+	info, err := os.Stat(path)
+
+	if err == nil {
+		// 2. Path exists. Check if it's a directory.
+		if checkIfItsDir {
+			if info.IsDir() {
+				WriteToLog(fmt.Sprintf("Directory exists: %s", path))
+				return true
+			}
+
+			// Path exists but is a file, not a directory.
+			WriteToLog(fmt.Sprintf("Path exists, but its not a directory: %s", path))
+			return false
+		}
+		// Its a file and it exists
+		WriteToLog(fmt.Sprintf("Path exists, its a file: %s", path))
+		return true
+	}
+
+	// 3. Path does not exist.
+	if os.IsNotExist(err) {
+		WriteToLog(fmt.Sprintf("File or Directory does NOT exist: %s", path))
+		return false
+	}
+
+	WriteToLog(fmt.Sprintf("Cannot determine if directory exists: %s", path))
+
+	// 4. A different error occurred (e.g., permission issue).
+	return false
+}
+
+func getUniqueLogFileName(logNameRoot string) string {
+	for i := 0; i < maxLogFiles; i++ {
+		_, err := os.Stat(fmt.Sprintf("%s.%d", logNameRoot, i))
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Sprintf("%s.%d", logNameRoot, i)
+		}
+	}
+
+	return fmt.Sprintf("%s.%d", logNameRoot, 0)
+}
+
+func CreateUniqueFilePath(logNameRoot string) *os.File {
+	// Make the directory if it does not exist, fail silently
+	_ = os.MkdirAll(filepath.Dir(logNameRoot), 0755)
+	logFile, err := os.OpenFile(getUniqueLogFileName(logNameRoot), os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		// If we can't open the log file, it's a fatal error, so we exit.
+		return nil
+	}
+
+	// logFile is intentionally not closed - its kept open
+	return logFile
+}
+
+func QueryURLAndGetResult(authToken string, url string) (string, bool) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		WriteToLog(fmt.Sprintf("Could create HTTP request object to to URL: %s", url))
+		return "", false
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	authHeader := fmt.Sprintf("Bearer %s", authToken)
+	req.Header.Set("Authorization", authHeader)
+	client := &http.Client{
+		Timeout: 30 * time.Second, // Set a reasonable timeout.
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		WriteToLog("Could not making HTTP request to URL: " + url)
+		return "", false
+	}
+	// Defer the closing of the response body.
+	// This is important to free up network resources.
+	defer resp.Body.Close()
+
+	// Check the status code
+	if resp.StatusCode != http.StatusOK {
+		WriteToLog("http.Get() did NOT return StatusOK")
+		return "", false
+	}
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		WriteToLog("io.ReadAll(body) returned error. Returning ERROR")
+		return "", false
+	}
+
+	bodyString := string(body)
+	return bodyString, true
+}
+
+// containsAny checks if a string contains any of the substrings.
+func StringMatchesAnySubstring(s string, substrings []string) bool {
+	for _, sub := range substrings {
+		if strings.Contains(s, sub) {
+			return true // Found a match
+		}
+	}
+	return false // No matches found
+}
+
+// contains checks if an integer is present in a slice.
+func IntArrContains(s []int, e int) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
+
+// RunGcloudListCommand executes a 'gcloud compute <resource> list' command and returns the names.
+func RunGcloudListCommand(resource string) ([]string, error) {
+	cmd := exec.Command("gcloud", "compute", resource, "list", "--format=json")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gcloud command for %s failed: %w", resource, err)
+	}
+
+	var items []GcloudListItem
+	if err := json.Unmarshal(output, &items); err != nil {
+		return nil, fmt.Errorf("failed to parse gcloud output for %s: %w", resource, err)
+	}
+
+	names := make([]string, len(items))
+	for i, item := range items {
+		names[i] = item.Name
+	}
+
+	return names, nil
+}
+
+// GetGCloudRegionsAndZones fetches all available GCP regions and zones using the gcloud CLI.
+func GetGCloudRegionsAndZones() ([]string, []string, error) {
+	regions, err := RunGcloudListCommand("regions")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get regions: %w", err)
+	}
+
+	zones, err := RunGcloudListCommand("zones")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get zones: %w", err)
+	}
+
+	return regions, zones, nil
+}
+
+// SearchLogsCore is the shared engine for querying Cloud Logging.
+func SearchLogsCore(ctx context.Context, projectID string, filter string, maxResults int) ([]StockoutEvent, error) {
+	client, err := logadmin.NewClient(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create logadmin client: %w", err)
+	}
+	defer client.Close()
+
+	it := client.Entries(ctx, logadmin.Filter(filter))
+	var events []StockoutEvent
+
+	for {
+		entry, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error iterating logs: %w", err)
+		}
+
+		// 1. Mandatory Zone Retrieval
+		zone := entry.Resource.Labels["zone"]
+		if strings.Contains(zone, "/") {
+			parts := strings.Split(zone, "/")
+			zone = parts[len(parts)-1]
+		}
+
+		// 2. Mandatory Cluster Name Retrieval (Resource Labels -> Metadata Labels)
+		clusterName := entry.Resource.Labels["cluster_name"]
+		if clusterName == "" {
+			// Fallback for Slurm or specific metadata labels
+			if val, ok := entry.Labels["slurm_cluster_name"]; ok {
+				clusterName = val
+			} else {
+				clusterName = "unknown-cluster"
+			}
+		}
+
+		// 3. Populate Event (Capturing Instance ID, ClusterName, Zone, and Timestamp)
+		events = append(events, StockoutEvent{
+			ClusterName:  clusterName,
+			InstanceName: getInstanceNameFromLogEntry(entry), // Captures Instance ID/Name
+			Timestamp:    entry.Timestamp,
+			Zone:         zone,
+			ProjectID:    projectID,
+			Payload:      getPayloadString(entry),
+		})
+
+		if len(events) >= maxResults {
+			break
+		}
+	}
+	return events, nil
+}
+
+func SearchStockoutLogsMCP(ctx context.Context, projectID string, req SearchStockoutLogsRequest, filter_type string) (string, error) {
+	if projectID == "" {
+		return "GCP project not set. Please run 'gcloud config set project'.", nil
+	}
+
+	// 1. Define the "Stockout" Filter logic
+	filter := `(jsonPayload.message:"ZONE_RESOURCE_POOL_EXHAUSTED" OR textPayload:"ZONE_RESOURCE_POOL_EXHAUSTED")`
+	filter += ` AND resource.type="gce_instance"`
+
+	if filter_type == "gke" {
+		filter += ` AND resource.labels.instance_name:"gke-"`
+	} else if filter_type == "slurm" {
+		// Ensuring we capture Slurm nodes which often don't have the gke- prefix
+		filter += ` AND NOT resource.labels.instance_name:"gke-"`
+	}
+
+	if req.Zone != "" {
+		filter += fmt.Sprintf(` AND resource.labels.zone="%s"`, req.Zone)
+	}
+
+	// Handle Time Range
+	startDate, startValid := ParseTime(req.StartDate)
+	if startValid {
+		filter += fmt.Sprintf(` AND timestamp >= "%s"`, startDate.Format(time.RFC3339))
+	} else {
+		// Default to 7 days if no date provided
+		filter += fmt.Sprintf(` AND timestamp >= "%s"`, time.Now().AddDate(0, 0, -7).Format(time.RFC3339))
+	}
+
+	// 2. Call the Core logic
+	events, err := SearchLogsCore(ctx, projectID, filter, req.MaxResults)
+	if err != nil {
+		return "", fmt.Errorf("failed to search stockouts: %w", err)
+	}
+
+	if len(events) == 0 {
+		return fmt.Sprintf("No %s stockout errors found in the specified timeframe.", strings.ToUpper(filter_type)), nil
+	}
+
+	summary := AggregateStockouts(events)
+
+	// 3. Format result with Dynamic Header
+	var report strings.Builder
+	report.WriteString(fmt.Sprintf("### %s Stockout Analysis Report\n", strings.ToUpper(filter_type)))
+	report.WriteString(fmt.Sprintf("Detected **%d** resource exhaustion events.\n\n", summary.TotalCount))
+
+	report.WriteString("#### **Summary by Zone**\n")
+	for zone, count := range summary.ByZone {
+		report.WriteString(fmt.Sprintf("- **Zone: %s** | Total Errors: %d\n", zone, count))
+	}
+	report.WriteString("\n---\n")
+
+	report.WriteString("#### **Detailed Event List**\n")
+
+	type nodeKey struct {
+		cluster string
+		node    string
+	}
+	counts := make(map[nodeKey]int)
+	for _, e := range events {
+		k := nodeKey{cluster: e.ClusterName, node: e.InstanceName}
+		counts[k]++
+	}
+
+	seen := make(map[nodeKey]bool)
+	limit := 10
+	printed := 0
+
+	for _, e := range events {
+		k := nodeKey{cluster: e.ClusterName, node: e.InstanceName}
+		if seen[k] {
+			continue
+		}
+		if printed >= limit {
+			report.WriteString(fmt.Sprintf("\n*...and %d other unique node failures.*", len(counts)-limit))
+			break
+		}
+
+		// OUTPUT: All 4 mandatory fields + error count
+		report.WriteString(fmt.Sprintf("- **Cluster:** `%s` | **NodeID:** `%s` | **Zone:** `%s` | **Time:** `%s` | **Errors:** %d\n",
+			e.ClusterName, e.InstanceName, e.Zone, e.Timestamp.Format(time.RFC1123), counts[k]))
+
+		seen[k] = true
+		printed++
+	}
+
+	report.WriteString("\n**Next Steps:** Bridge to `google-compute-mcp` to audit Instance Templates (Step 2) and Reservations (Step 3).")
+
+	return report.String(), nil
+}
+
+// Helper to extract string content from either text or JSON payloads
+func getPayloadString(entry *logging.Entry) string {
+	switch p := entry.Payload.(type) {
+	case string:
+		return p
+	case *structpb.Struct: 
+		// If using structured logging, the actual message is usually in a "message" or "log" field
+		if val, ok := p.Fields["message"]; ok {
+			return val.GetStringValue()
+		}
+		if val, ok := p.Fields["log"]; ok {
+			return val.GetStringValue()
+		}
+		return p.String() 
+	default:
+		return fmt.Sprintf("%v", p)
+	}
+}
+
+// getInstanceNameFromLogEntry extracts an instance name from various common log fields.
+func getInstanceNameFromLogEntry(entry *logging.Entry) string {
+	labels := []string{"instance_id", "instance_name", "node_name", "name"}
+	for _, l := range labels {
+		if v, ok := entry.Resource.Labels[l]; ok && v != "" {
+			return v
+		}
+	}
+	// Fallback to entry labels (common for GCE instances)
+	if v, ok := entry.Labels["compute.googleapis.com/resource_name"]; ok && v != "" {
+		return v
+	}
+	return "unknown-instance"
+}
+
+// AggregateStockouts summarizes the event data.
+func AggregateStockouts(events []StockoutEvent) StockoutSummary {
+	summary := StockoutSummary{
+		TotalCount: len(events),
+		ByZone:     make(map[string]int),
+	}
+	for _, e := range events {
+		summary.ByZone[e.Zone]++
+		if summary.LatestEvent == nil || e.Timestamp.After(summary.LatestEvent.Timestamp) {
+			summary.LatestEvent = &e
+		}
+	}
+	return summary
+}
+
+
+
