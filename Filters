@@ -1,0 +1,68 @@
+func BuildStockoutFilter(
+	start, end time.Time,
+	req StockoutSearchRequest,
+) string {
+
+	filter := `
+resource.type="gce_instance"
+protoPayload.serviceName="compute.googleapis.com"
+(
+  protoPayload.methodName="v1.compute.instances.insert"
+  OR
+  protoPayload.methodName="beta.compute.instances.bulkInsert"
+)
+protoPayload.status.message:"ZONE_RESOURCE_POOL_EXHAUSTED"
+`
+
+	switch req.ClusterType {
+
+	case ClusterTypeGKE:
+
+		// 🔹 If cluster name provided → filter to that cluster
+		if req.ClusterName != "" {
+
+			filter += fmt.Sprintf(
+				` AND labels."container.googleapis.com/cluster-name"="%s"`,
+				req.ClusterName,
+			)
+
+		} else {
+
+			// 🔹 If cluster name NOT provided → search all GKE clusters
+			filter += ` AND labels."container.googleapis.com/cluster-name":*`
+		}
+
+	case ClusterTypeSlurm:
+
+		// Based on your real Slurm log
+		filter += fmt.Sprintf(
+			` AND labels."slurm_cluster_name"="%s"`,
+			req.ClusterName,
+		)
+
+		filter += ` AND labels."hypercompute_cluster_resource"="true"`
+	}
+
+	if req.Zone != "" {
+		filter += fmt.Sprintf(
+			` AND resource.labels.zone="%s"`,
+			req.Zone,
+		)
+	}
+
+	if !start.IsZero() {
+		filter += fmt.Sprintf(
+			` AND timestamp >= "%s"`,
+			start.Format(time.RFC3339),
+		)
+	}
+
+	if !end.IsZero() {
+		filter += fmt.Sprintf(
+			` AND timestamp <= "%s"`,
+			end.Format(time.RFC3339),
+		)
+	}
+
+	return filter
+}
