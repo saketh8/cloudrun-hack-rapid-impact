@@ -1,0 +1,32 @@
+func (h *handlers) searchStockoutMCP(
+	ctx context.Context,
+	req SearchStockoutRequest,
+) (string, error) {
+
+	var startTime, endTime time.Time
+	var startValid, endValid bool
+
+	if req.StartDate != "" {
+		startTime, startValid = genericCore.ParseTime(req.StartDate)
+		if !startValid {
+			return "Invalid StartDate format.", nil
+		}
+	}
+
+	if req.EndDate != "" {
+		endTime, endValid = genericCore.ParseTime(req.EndDate)
+		if !endValid {
+			return "Invalid EndDate format.", nil
+		}
+	}
+
+	searchReq := genericCore.StockoutSearchRequest{
+		ClusterType: genericCore.ClusterTypeGKE, // or Slurm
+		ClusterName: req.ClusterName,
+		Zone:        req.Zone,
+		StartTime:   startTime,
+		EndTime:     endTime,
+	}
+
+	return genericCore.SearchStockoutMCP(ctx, searchReq)
+}
