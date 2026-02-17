@@ -1,0 +1,93 @@
+func SearchStockoutErrors(
+	ctx context.Context,
+	projectID string,
+	req StockoutSearchRequest,
+	defaultProjectID string,
+) (string, error) {
+
+	WriteToLog("SearchStockoutErrors.0000")
+
+	if projectID == "" {
+		projectID = defaultProjectID
+	}
+
+	client, err := logadmin.NewClient(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create log client: %v", err)
+	}
+	defer client.Close()
+
+	filter := BuildStockoutFilter(req.StartTime, req.EndTime, req)
+
+	WriteToLog("Stockout Filter: " + filter)
+
+	it := client.Entries(ctx, logadmin.Filter(filter))
+
+	type StockoutEvent struct {
+		Timestamp    time.Time
+		InstanceName string
+		Zone         string
+		ClusterName  string
+	}
+
+	var events []StockoutEvent
+
+	for {
+		entry, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("error iterating logs: %v", err)
+		}
+
+		instanceName := ""
+		zone := ""
+		clusterName := ""
+
+		if entry.Resource != nil {
+			instanceName = entry.Resource.Labels["instance_id"]
+			zone = entry.Resource.Labels["zone"]
+		}
+
+		if entry.Labels != nil {
+			clusterName = entry.Labels["container.googleapis.com/cluster-name"]
+			if clusterName == "" {
+				clusterName = entry.Labels["slurm_cluster_name"]
+			}
+		}
+
+		events = append(events, StockoutEvent{
+			Timestamp:    entry.Timestamp,
+			InstanceName: instanceName,
+			Zone:         zone,
+			ClusterName:  clusterName,
+		})
+	}
+
+	if len(events) == 0 {
+		return "No stockout errors found.", nil
+	}
+
+	// Optional: Check consumption type for first instance
+	firstInstance := events[0].InstanceName
+
+	consumptionInfo, _ := ProcessConsumptionRequest(
+		ctx,
+		[]string{firstInstance},
+		events[0].Zone,
+		projectID,
+		defaultProjectID,
+	)
+
+	result := fmt.Sprintf(
+		"Found %d stockout events.\nFirst occurrence: %v\nZone: %s\nCluster: %s\n\nConsumption Info:\n%s",
+		len(events),
+		events[0].Timestamp,
+		events[0].Zone,
+		events[0].ClusterName,
+		consumptionInfo,
+	)
+
+	return result, nil
+}
