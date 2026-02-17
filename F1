@@ -1,0 +1,56 @@
+func SearchStockoutMCP(
+	ctx context.Context,
+	projectID string,
+	clusterName string,
+	zone string,
+	startDateStr string,
+	endDateStr string,
+	defaultProjectID string,
+) (string, error) {
+
+	WriteToLog("SearchStockoutMCP.0000")
+
+	if projectID == "" {
+		projectID = defaultProjectID
+	}
+
+	var startTime, endTime time.Time
+	var startValid, endValid bool
+
+	if startDateStr != "" {
+		startTime, startValid = ParseTime(startDateStr)
+		if !startValid {
+			return "Invalid StartDate format.", nil
+		}
+	}
+
+	if endDateStr != "" {
+		endTime, endValid = ParseTime(endDateStr)
+		if !endValid {
+			return "Invalid EndDate format.", nil
+		}
+	}
+
+	// 🔥 AUTO-DETECT CLUSTER TYPE
+	clusterType := ClusterTypeGKE
+
+	// If cluster name contains slurm → treat as Slurm
+	if strings.Contains(strings.ToLower(clusterName), "slurm") {
+		clusterType = ClusterTypeSlurm
+	}
+
+	searchReq := StockoutSearchRequest{
+		ClusterType: clusterType,
+		ClusterName: clusterName,
+		Zone:        zone,
+		StartTime:   startTime,
+		EndTime:     endTime,
+	}
+
+	return SearchStockoutErrors(
+		ctx,
+		projectID,
+		searchReq,
+		defaultProjectID,
+	)
+}
