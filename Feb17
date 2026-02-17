@@ -1,0 +1,63 @@
+func ProcessStockoutRequest(
+	ctx context.Context,
+	startDateStr string,
+	endDateStr string,
+	clusterName string,
+	zone string,
+	defaultProjectID string,
+) (string, error) {
+
+	WriteToLog("ProcessStockoutRequest.0000")
+
+	projectID := defaultProjectID
+	if projectID == "" {
+		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+
+	if projectID == "" {
+		return "Could not determine GCP project.", nil
+	}
+
+	var startTime, endTime time.Time
+	var startValid, endValid bool
+
+	if startDateStr != "" {
+		startTime, startValid = ParseTime(startDateStr)
+		if !startValid {
+			return "Invalid StartDate format.", nil
+		}
+	}
+
+	if endDateStr != "" {
+		endTime, endValid = ParseTime(endDateStr)
+		if !endValid {
+			return "Invalid EndDate format.", nil
+		}
+	}
+
+	// 🔥 Auto detect cluster type
+	clusterType := ClusterTypeGKE
+
+	// Try GKE first
+	searchReq := StockoutSearchRequest{
+		ClusterType: clusterType,
+		ClusterName: clusterName,
+		Zone:        zone,
+		StartTime:   startTime,
+		EndTime:     endTime,
+	}
+
+	result, err := SearchStockoutErrors(ctx, projectID, searchReq, projectID)
+	if err != nil {
+		return "", err
+	}
+
+	// If nothing found, try Slurm
+	if result == "No stockout errors found." {
+
+		searchReq.ClusterType = ClusterTypeSlurm
+		return SearchStockoutErrors(ctx, projectID, searchReq, projectID)
+	}
+
+	return result, nil
+}
